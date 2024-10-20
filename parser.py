@@ -2,17 +2,42 @@ from __future__ import print_function
 import sys
 import pprint
 from elftools.elf.elffile import ELFFile
-
+from dataclasses import dataclass
 # Global variable for pointer size
 POINTER_SIZE = None
 
-def get_type_size(die, dwarfinfo):
+@dataclass
+class Die:
+    tag: str
+    die_offset: int
+
+@dataclass
+class Type(Die):
+    name: str
+    size: int
+
+@dataclass
+class Struct(Type):
+    members: list["Variable"]
+
+@dataclass
+class Array(Type):
+    array_size: int
+    array_elements: "Type"
+
+@dataclass
+class Variable(Die):
+    name: str
+    location: int
+    type: Type
+
+def get_type_size(die):
     if "DW_AT_byte_size" in die.attributes:
         return die.attributes["DW_AT_byte_size"].value
 
     if die.tag == "DW_TAG_array_type":
         element_type = die.get_DIE_from_attribute("DW_AT_type")
-        element_size = get_type_size(element_type, dwarfinfo)
+        element_size = get_type_size(element_type)
         for child in die.iter_children():
             if child.tag == "DW_TAG_subrange_type":
                 if "DW_AT_count" in child.attributes:
@@ -25,7 +50,7 @@ def get_type_size(die, dwarfinfo):
     if die.tag in ["DW_TAG_typedef", "DW_TAG_const_type", "DW_TAG_volatile_type"]:
         if "DW_AT_type" in die.attributes:
             typedef_die = die.get_DIE_from_attribute("DW_AT_type")
-            return get_type_size(typedef_die, dwarfinfo)
+            return get_type_size(typedef_die)
 
     if die.tag == "DW_TAG_base_type":
         if "DW_AT_encoding" in die.attributes and "DW_AT_byte_size" in die.attributes:
@@ -47,7 +72,7 @@ def get_type_size(die, dwarfinfo):
             ):
                 offset = member.attributes["DW_AT_data_member_location"].value
                 member_type = member.get_DIE_from_attribute("DW_AT_type")
-                member_size = get_type_size(member_type, dwarfinfo)
+                member_size = get_type_size(member_type)
                 max_offset = max(max_offset, offset)
                 max_size = max(max_size, member_size)
         return max_offset + max_size
@@ -55,30 +80,60 @@ def get_type_size(die, dwarfinfo):
     return None
 
 
-def get_type_name(die, dwarfinfo):
+def get_die_name(die):
     if die.tag == "DW_TAG_base_type":
         return die.attributes["DW_AT_name"].value.decode("utf-8")
+    
     elif die.tag == "DW_TAG_typedef":
-        if "DW_AT_type" in die.attributes:
-            return get_type_name(die.get_DIE_from_attribute("DW_AT_type"), dwarfinfo)
-        else:
+        if "DW_AT_name" in die.attributes:
             return die.attributes["DW_AT_name"].value.decode("utf-8")
+        elif "DW_AT_type" in die.attributes:
+            return get_die_name(die.get_DIE_from_attribute("DW_AT_type"))
+        else:
+            return "Unnamed typedef"
+        
+    elif die.tag == "DW_TAG_member":
+        if "DW_AT_name" in die.attributes:
+            return die.attributes["DW_AT_name"].value.decode("utf-8")
+        else:
+            return "Unnamed member"
+        
+    elif die.tag == "DW_TAG_variable":
+        if "DW_AT_name" in die.attributes:
+            return die.attributes["DW_AT_name"].value.decode("utf-8")
+        else:
+            return "Unnamed variable"
+        
     elif die.tag == "DW_TAG_pointer_type":
         if "DW_AT_type" in die.attributes:
-            pointed_type = get_type_name(
-                die.get_DIE_from_attribute("DW_AT_type"), dwarfinfo
+            pointed_type = get_die_name(
+                die.get_DIE_from_attribute("DW_AT_type")
             )
             return f"{pointed_type}*"
         else:
             return "void*"
+        
     elif die.tag == "DW_TAG_array_type":
         if "DW_AT_type" in die.attributes:
-            element_type = get_type_name(
-                die.get_DIE_from_attribute("DW_AT_type"), dwarfinfo
+            element_type = get_die_name(
+                die.get_DIE_from_attribute("DW_AT_type")
             )
             array_size = get_array_size(die)
             return f"{element_type}[{array_size}]"
-    elif die.tag == "DW_TAG_structure_type":
+        
+    elif die.tag == "DW_TAG_const_type":
+        if "DW_AT_type" in die.attributes:
+            return "const " + get_die_name(die.get_DIE_from_attribute("DW_AT_type"))
+        else:
+            return "const"
+        
+    elif die.tag == "DW_TAG_volatile_type":
+        if "DW_AT_type" in die.attributes:
+            return "volatile " + get_die_name(die.get_DIE_from_attribute("DW_AT_type"))
+        else:
+            return "volatile"
+        
+    elif die.tag in ["DW_TAG_structure_type", "DW_TAG_union_type"]:
         if "DW_AT_name" in die.attributes:
             return die.attributes["DW_AT_name"].value.decode("utf-8")
         else:
@@ -97,85 +152,88 @@ def get_array_size(die):
     return None
 
 
-def get_structure_by_offset(structures, offset):
-    for structure in structures:
-        if structure["die_offset"] == offset:
-            return structure
-    return None
-
-
-def parse_type(die, dwarfinfo):
-    if die.tag == "DW_TAG_structure_type":
-        structure = {
-            "name": die.attributes.get("DW_AT_name", {}).value,
-            "members": [],
-            "die_offset": die.offset,
-            "size": get_type_size(die, dwarfinfo),
-        }
+def parse_type(die):
+    if die.tag == "DW_TAG_structure_type" or die.tag == "DW_TAG_union_type":
+        structure = Struct(
+            tag = die.tag,
+            die_offset = die.offset,
+            name = get_die_name(die),
+            members = [],
+            size = get_type_size(die),
+        )
         for child in die.iter_children():
             if child.tag == "DW_TAG_member":
-                member = {
-                    "name": child.attributes["DW_AT_name"].value.decode("utf-8"),
-                    "offset": child.attributes.get(
-                        "DW_AT_data_member_location", {}
-                    ).value,
-                    "type": parse_type(
-                        child.get_DIE_from_attribute("DW_AT_type"), dwarfinfo
-                    ),
-                }
-                structure["members"].append(member)
+                structure.members.append(parse_variable(child))
+            else:
+                print(f"unhandled child tag: {child.tag}")
         return structure
 
-        # Handle array types
+
     if die.tag == "DW_TAG_array_type":
-        structure = {
-            "name": get_type_name(die, dwarfinfo),
-            "die_offset": die.offset,
-            "size": get_type_size(die, dwarfinfo),
-        }
-        element_type_die = die.get_DIE_from_attribute("DW_AT_type")
-        array_size = get_array_size(die)
-        if array_size:
-            structure["array_size"] = array_size
-            structure["array_elements"] = parse_type(element_type_die, dwarfinfo)
-            # Calculate total size of the array
-            element_size = get_type_size(element_type_die, dwarfinfo)
-            if element_size:
-                structure["size"] = element_size * array_size
+        structure = Array(
+            tag = die.tag,
+            die_offset = die.offset,
+            name = get_die_name(die),
+            size = get_type_size(die),
+            array_size = get_array_size(die),
+            array_elements = parse_type(die.get_DIE_from_attribute("DW_AT_type")),
+        )
         return structure
 
-    if die.tag in ["DW_TAG_base_type", "DW_TAG_pointer_type", "DW_TAG_typedef"]:
-        return {
-            "name": get_type_name(die, dwarfinfo),
-            "die_offset": die.offset,
-            "size": get_type_size(die, dwarfinfo),
-        }
+    if die.tag in ["DW_TAG_typedef", "DW_TAG_const_type", "DW_TAG_volatile_type"]:
+        type = parse_type(die.get_DIE_from_attribute("DW_AT_type"))
+        if type:
+            type.name = get_die_name(die)
+        return type
+
+    if die.tag in ["DW_TAG_base_type", "DW_TAG_pointer_type"]:
+        return Type(
+            tag = die.tag,
+            die_offset = die.offset,
+            name = get_die_name(die),
+            size = get_type_size(die),
+        )
+    
+    return Type(
+        tag = die.tag,
+        die_offset = die.offset,
+        name = get_die_name(die),
+        size = get_type_size(die),
+    )
 
 
-def get_structures(CU, dwarfinfo):
+
+def get_structures(CU):
     structures = []
     for die in CU.iter_DIEs():
-        element = parse_type(die, dwarfinfo)
+        element = parse_type(die)
         if element:
             structures.append(element)
     return structures
 
 
-def parse_variable(die, dwarfinfo):
-    return {
-        "name": die.attributes["DW_AT_name"].value.decode("utf-8"),
-        "type": parse_type(die.get_DIE_from_attribute("DW_AT_type"), dwarfinfo),
-        "location": hex(
-            int.from_bytes(die.attributes["DW_AT_location"].value, byteorder="little")
-        ),
-    }
+def parse_variable(die):
+    if "DW_AT_location" in die.attributes:
+        location = int.from_bytes(die.attributes["DW_AT_location"].value, byteorder="little")
+    elif "DW_AT_data_member_location" in die.attributes:
+        location = die.attributes["DW_AT_data_member_location"].value
+    else:
+        location = None
+    
+    return Variable(
+        name = get_die_name(die),
+        type =  parse_type(die.get_DIE_from_attribute("DW_AT_type")),
+        location = location,
+        die_offset = die.offset,
+        tag = die.tag,
+    )
 
 
-def get_variables(CU, dwarfinfo):
+def get_variables(CU):
     variables = []
     for die in CU.iter_DIEs():
         if die.tag == "DW_TAG_variable":
-            variables.append(parse_variable(die, dwarfinfo))
+            variables.append(parse_variable(die))
     return variables
 
 
@@ -203,11 +261,11 @@ def process_file(filename):
             # for structure in structures:
             #     pprint.pprint(structure)
 
-            variables = get_variables(CU, dwarfinfo)
+            variables = get_variables(CU)
             for variable in variables:
                 pprint.pprint(variable)
         print("Done processing", filename)
-        return
+        return variables
 
 
 if __name__ == "__main__":

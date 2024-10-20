@@ -1,18 +1,21 @@
 
 #include <stdint.h>
 
-struct subexample_t {
-    uint32_t value;
-    uint8_t value2;
-};
+typedef struct subexample_t {
+    union {
+        uint32_t value;
+        uint8_t value2;
+    };
+} subexample_typedef_t;
 
 struct example_t {
-    struct subexample_t subs[5];
+    subexample_typedef_t subs[5];
     uint32_t value;
 };
 
 struct example_t example1;
-struct example_t example2;
+volatile struct example_t example2;
+const struct example_t example3;
 
 int main(int argc, char **argv)
 {
