@@ -2,6 +2,9 @@ from __future__ import print_function
 import sys
 import pprint
 from elftools.elf.elffile import ELFFile
+from elftools.dwarf.compileunit import CompileUnit
+from elftools.dwarf.die import DIE, AttributeValue
+
 from dataclasses import dataclass
 import leb128
 # Global variable for pointer size
@@ -221,17 +224,31 @@ def get_structures(CU):
             structures.append(element)
     return structures
 
+def decode_attribute_value(attr: AttributeValue):
+    if attr.form == "DW_FORM_exprloc":
+        loc_length = leb128.u.decode([attr.value[0]]) #this is a bit of a hack, but this leb128 library is broken
+        return int.from_bytes(attr.value[1:(1+ loc_length)], "little")
+    elif attr.form.startswith("DW_FORM_data"):
+        return attr.value #decoded by the library it seems
+    elif attr.form == "DW_FORM_block1":
+        length = int.from_bytes(attr.value[:1], "little")
+        return int.from_bytes(attr.value[1:][:length], "little")
+    elif attr.form == "DW_FORM_block2":
+        length = int.from_bytes(attr.value[:2], "little")
+        return int.from_bytes(attr.value[2:][:length], "little")
+    elif attr.form == "DW_FORM_block4":
+        length = int.from_bytes(attr.value[:4], "little")
+        return int.from_bytes(attr.value[4:][:length], "little")
+    else:
+        assert False, "Data form not parsed"
+    
+
 
 def parse_variable(die):
     if "DW_AT_location" in die.attributes:
-        attr = die.attributes["DW_AT_location"]
-        if attr.form == "DW_FORM_exprloc":
-            loc_length = leb128.u.decode([attr.value[0]]) #this is a bit of a hack, but this leb128 library is broken
-            location = int.from_bytes(attr.value[1:(1+ loc_length)], "little")
-        else:
-            assert False, "Unexpected location form"
+        location = decode_attribute_value(die.attributes["DW_AT_location"])
     elif "DW_AT_data_member_location" in die.attributes:
-        location = die.attributes["DW_AT_data_member_location"].value
+        location = decode_attribute_value(die.attributes["DW_AT_data_member_location"])
     else:
         location = 0
     
@@ -244,7 +261,7 @@ def parse_variable(die):
     )
 
 
-def get_variables(CU):
+def get_variables(CU: CompileUnit):
     variables = []
     for die in CU.iter_DIEs():
         if die.tag == "DW_TAG_variable":
@@ -263,7 +280,10 @@ def process_file(filename):
             return
 
         POINTER_SIZE = 8 if elffile.elfclass == 64 else 4
+
+
         dwarfinfo = elffile.get_dwarf_info()
+        
         cus = dwarfinfo.iter_CUs()
         for CU in cus:
             print(
