@@ -3,6 +3,7 @@ import sys
 import pprint
 from elftools.elf.elffile import ELFFile
 from dataclasses import dataclass
+import leb128
 # Global variable for pointer size
 POINTER_SIZE = None
 
@@ -95,6 +96,8 @@ def get_die_name(die):
     elif die.tag == "DW_TAG_member":
         if "DW_AT_name" in die.attributes:
             return die.attributes["DW_AT_name"].value.decode("utf-8")
+        elif "DW_AT_type" in die.attributes:
+            return "Unnamed " + get_die_name(die.get_DIE_from_attribute("DW_AT_type"))
         else:
             return "Unnamed member"
         
@@ -133,11 +136,18 @@ def get_die_name(die):
         else:
             return "volatile"
         
-    elif die.tag in ["DW_TAG_structure_type", "DW_TAG_union_type"]:
+    elif die.tag == "DW_TAG_structure_type":
         if "DW_AT_name" in die.attributes:
             return die.attributes["DW_AT_name"].value.decode("utf-8")
         else:
-            return "unnamed structure"
+            return "unnamed struct"
+        
+    elif die.tag == "DW_TAG_union_type":
+        if "DW_AT_name" in die.attributes:
+            return die.attributes["DW_AT_name"].value.decode("utf-8")
+        else:
+            return "unnamed union"
+        
     else:
         return f"unhandled type ({die.tag})"
 
@@ -214,11 +224,16 @@ def get_structures(CU):
 
 def parse_variable(die):
     if "DW_AT_location" in die.attributes:
-        location = int.from_bytes(die.attributes["DW_AT_location"].value, byteorder="little")
+        attr = die.attributes["DW_AT_location"]
+        if attr.form == "DW_FORM_exprloc":
+            loc_length = leb128.u.decode([attr.value[0]]) #this is a bit of a hack, but this leb128 library is broken
+            location = int.from_bytes(attr.value[1:(1+ loc_length)], "little")
+        else:
+            assert False, "Unexpected location form"
     elif "DW_AT_data_member_location" in die.attributes:
         location = die.attributes["DW_AT_data_member_location"].value
     else:
-        location = None
+        location = 0
     
     return Variable(
         name = get_die_name(die),
