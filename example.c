@@ -21,4 +21,7 @@ int main(int argc, char **argv)
 {
     example1.subs[1].value2 = 5;
     example2.subs[3].value = 5;
+
+    subexample_typedef_t local_variable;
+    local_variable.value = 5;
 }
